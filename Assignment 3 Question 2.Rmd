@@ -1,0 +1,287 @@
+---
+title: "Analysis of Temperature Change on Sable Island"
+author: "Fiona McLean"
+output: pdf_document
+header-includes:
+  - \usepackage[table,xcdraw]{xcolor}
+  - \usepackage{subcaption}
+  - \usepackage{float}
+---
+
+
+\newcommand{\subfloat}[2][need a sub-caption]{\subcaptionbox{#1}{#2} }
+
+```{r setup, include=FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+heatUrl = "http://pbrown.ca/teaching/appliedstats/data/sableIsland.rds"
+heatFile = tempfile(basename(heatUrl))
+download.file(heatUrl, heatFile)
+x = readRDS(heatFile)
+x$month = as.numeric(format(x$Date, "%m")) #take out the month
+xSub = x[x$month %in% 5:10 & !is.na(x$Max.Temp...C.), #only give me the summer months and get rid of missing 
+         ]
+weekValues = seq(min(xSub$Date), ISOdate(2053, 1, 1,
+                                         0, 0, 0, tz = "UTC"), by = "7 days") #weekly model
+xSub$week = cut(xSub$Date, weekValues)
+xSub$weekIid = xSub$week #for indep effect
+xSub$day = as.numeric(difftime(xSub$Date, min(weekValues),
+                               units = "days"))
+xSub$cos12 = cos(xSub$day * 2 * pi/365.25) #used to make a seasonal effect
+xSub$sin12 = sin(xSub$day * 2 * pi/365.25) #used to make a seasonal effect
+xSub$cos6 = cos(xSub$day * 2 * 2 * pi/365.25) #used to make a seasonal effect
+xSub$sin6 = sin(xSub$day * 2 * 2 * pi/365.25)#used to make a seasonal effect
+
+xSub$yearFac = factor(format(xSub$Date, "%Y"))
+
+
+library("INLA")
+mm = get("inla.models", INLA:::inla.get.inlaEnv())
+if(class(mm) == 'function') mm = mm()
+mm$latent$rw2$min.diff = NULL
+assign("inla.models", mm, INLA:::inla.get.inlaEnv())
+
+lmStart = lm(Max.Temp...C. ~ sin12 + cos12 + sin6 +
+               cos6, data = xSub)
+startingValues = c(lmStart$fitted.values, rep(lmStart$coef[1],
+                                              nlevels(xSub$week)), rep(0, nlevels(xSub$weekIid) +
+                                                                         nlevels(xSub$yearFac)), lmStart$coef[-1])
+
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+```
+
+##Introduction
+
+Global warming is slated to be this centuries greatest challenge, as record temperature levels and CO2 levels are being recorded worldwide. Global warming has grave consequences for life on Earth, as rising sea levels and temperatures are projected to disrupt the ecosystem, causing serious repercussions. Although most people accept global warming as a serious human-caused phenomenon that needs to be addressed immediately, others are not as convinced. The IPCC states that human activities are estimated to have caused approximately 1.0°C of global warming above preindustrial levels, with a likely range of 0.8°C to 1.2°C. Global warming is likely to reach 1.5°C between 2030 and 2052 if it continues to increase at the current rate. Others, such as Maxim Burningier and his party believe that “Climate change alarmism is based on flawed models that have consistently failed at correctly predicting the future.” In order to determine which party is correct, I will construct a model to predict how much temperatures have increased, and will increase in the future. 
+
+##Methods
+
+The data set used is over 22,000 observations of the daily maximum temperature in Sable Island from 1897 to 2019. Only the summer months are considered (May-October), as there are more complex environmental mechanisms involved in the temperature during winter months which creates more variation in temperature. Missing data is removed. 
+
+As an exploratory tool, tables of average temperature per year as well as a scatter plot with smoothing function showing the temperatures were created.
+
+In order to determine if temperatures have been increasing and to predict how much temperatures will change, a Bayesian semi-parametric mixed model was constructed. Bayesian models allow prior information to be incorporated into a model by specifying a prior and allow for complex models with many random variance factors to be fit, providing advantages over a frequentest model. We use a semi-parametric model in order to fit temperature, since we want to allow temperature to be fit with a non-linear line. The fixed effects in the model are sin's and cos's which allow us to model seasonal effects. A random walk is included in the model to allow us to make predictions. We use a random walk 2, since we expect that the trend will continue in a linear fashion once data is no longer available. We also add random effects on week and year. Adding a random effect on week allows us to model short term variation, as there may be some weeks which have extreme high or lows. The year random effect allows us to consider that some summers may be warmer than other summers due to other climatic factors unrelated to human caused global warming. The random effects allow us to model the independent variation in weeks and years, making the model more flexible to allow for these climatic variations. We model temperature with a t distribution, since the distribution is relatively normal, but the t allows for larger tails, or higher or lower temperatures which we observe in the dataset. 
+
+The model is:   
+   
+$Y_{i} \sim T(\nu_i, \mu_i, \sigma_{T})$  
+$\mu_{i} = X_{i}\beta + U(t_{i})+ V_i +F_i$  
+$U(t)-2U(t-1)+U(t-2) \sim N(0,\sigma^2_{u})$  
+$V_i \sim N(0,\sigma^2_{V})$  
+$F_i \sim N(0,\sigma^2_{F})$, where:  
+   
+- $\nu$ is the degrees of freedom, $\mu$ are observation specific locations, and $\sigma_{T}$ is the scale parameter
+- $Y_i$ is the maximum high temperature measured at a date $i$
+- $X_i\beta$ is the matrix of covariates, does not have an intercept, and are seasonal fixed effects
+- $U(t)$ is a second-order random walk.
+- $V_i$ is a random effect for week, which covers independent variation or over-dispersion of temperatures on some weeks
+- $F_i$ is a random effect for year, which covers independent variation or over-dispersion of temperatures in some years
+  
+  
+The priors are:  
+  
+- $\beta_{i} \sim N(0, 1000)$
+- $\sigma^2_{U}$ follows an exponential distribution with a median of $\frac{.1}{52 \times 100}$
+- $\sigma^2_{V}$ follows an exponential distribution with median 1.5
+- $\sigma^2_{F}$ follows an exponential distribution with median .75
+- $\sigma_{T}$ follows an exponential distribution with median 1
+- $\nu$ follows an exponential distribution with median 10
+
+The priors for the fixed effects were chosen to follow a normal distribution with mean 0 and standard deviation 1000, since the prior is uninformative. The prior on standard deviation for the random walk was chosen to be an exponential distribution with $\sigma^2_{U}$ = $\frac{.1}{52 \times 100}$ and $\alpha$ = .05. This prior was chosen because we believe that over 100 years the change in weekly maximum temperature will exceed 10%, 5% of the time. The prior on standard deviation for the week random effect was chosen to be an exponential distribution with $\sigma^2_{V}$ = 1.5 and $\alpha$ = .5. This prior was chosen because we believe that the probability of the standard deviation of maximum temperature between weeks being greater than 1.5 is .5. The prior on standard deviation for the year random effect was chosen to be an exponential distribution with $\sigma^2_{V}$ = .75 and $\alpha$ = .5. This prior was chosen because we believe that the probability of the standard deviation between years being greater than .75 is .5. We use these different priors for weeks and years since we expect variation in average summer temperatures between years is less than deviation of temperatures between weeks. For the t-distribution, the exponential prior on $\nu$ is used since half the time we believe the degrees of freedom will be greater than 10. An exponential prior on $\sigma_{T}$ is used since we believe that 50% of the time the standard deviation of average temperature between days is greater than 1.
+
+
+To determine how the temperature has changed from historical rates to now and from historical rates to our future projections, one could use a visual observation of Figure 4 to assert that temperature has increased since historical levels presently, with less certainty in the future. However, to be more rigorous, we look at posterior samples of the time trend. The posterior allow us to consider multiple possibilities as to how the temperature has or may change. First I take 1000 samples of the posterior distribution of the trend. For each sample, I take the mean of the temperature for each date. I then take the mean from 1900-1960 for each date, to provide us with a more accurate historical benchmark. I then find the difference between the temperature today and the historical benchmark, as well as the historical benchmark and the projected temperature in 2052. I then plot a histogram of the difference in temperatures for the 1000 samples. From these distributions, I am able to see what difference in temperatures is observed in 95% of the sample, or between the .025 and .975 quantiles. This allows me to create a CI for a projected amount that the temperature has and may change from historical rates, using the posteriors from the model.  
+
+##Results 
+
+First, I consider some graphs to get a better intuition about the data. The first graph shows a scatter plot of the temperatures that Burningier presents as evidence against global warming. However, I include a preliminary smoothing gam on top of the scatter plot, and it becomes clear that there appears to be an upward trend to the data. 
+
+```{r, include=FALSE}
+library(ggplot2)
+plot<- ggplot(xSub,aes(x = as.POSIXct(Date),y = Max.Temp...C.)) + 
+  geom_point(aes(colour = Max.Temp...C.)) +
+  scale_colour_gradient2(low = "blue", mid = "yellow" , high = "red", midpoint = 16) + 
+  geom_smooth(color = "red",size = 1) +
+  scale_y_continuous(limits = c(5,30), breaks = seq(5,30,5)) +
+  ggtitle ("Daily average temperature") +
+  xlab("Date") +  ylab ("Average Temperature ( ºC )") 
+
+library(dplyr)
+yearMaxTemp <- xSub %>% group_by(yearFac) %>% summarise(avg = mean(Max.Temp...C.))
+yearMaxTemp <- yearMaxTemp[2:nrow(yearMaxTemp),]
+
+library(ggplot2)
+
+plot2 <- ggplot2::ggplot(data=yearMaxTemp, aes(yearFac, avg))+geom_point()+geom_point(aes(colour = avg)) + scale_colour_gradient2(low = "blue", mid = "yellow" , high = "red", midpoint = 15.71)+ylab("Average Max Daily Temperature")+xlab("Year")+ggtitle("Avg Max Daily Temperature 1898-2019")+scale_x_discrete(breaks = yearMaxTemp$yearFac[seq(1, length(yearMaxTemp$yearFac), by = 10)])
+```
+
+```{r, warning=FALSE, echo=FALSE, fig.cap="The figure above shows a scatter graph of the temperatures, with a preliminary smoothing glm. We can see that the scatter graph looks about average, as noted by Burningier, however the smoothing line is showing an upward trend." ,fig.align='center',fig.pos='H', cache=TRUE, fig.height=3.5}
+plot
+ 
+```
+
+Next I consider an average of the daily maximum temperatures over each year from 1898 to 2019. Distilling the thousands of data points into averages allows a clearer image of an upward trend in temperatures. 
+```{r, fig.cap= "The figure above shows the average daily maximum temperature over the year for each year from 1898 to 2019. Again, we can see that the average of the daily maximum temperature over the years has an increasing trend.",  fig.align='center',fig.pos='H', fig.height=3.5, echo=FALSE}
+
+plot2
+
+```
+
+
+```{r, include=FALSE, cache=TRUE}
+mm = get("inla.models", INLA:::inla.get.inlaEnv())
+if(class(mm) == 'function') mm = mm()
+mm$latent$rw2$min.diff = NULL
+assign("inla.models", mm, INLA:::inla.get.inlaEnv())
+
+sableRes = INLA::inla(
+  Max.Temp...C. ~ 0 + sin12 + cos12 + sin6 + cos6 + #dont want an intercept so 0 - 
+    f(week, model='rw2', #random walk defined every week
+      constr=FALSE, #dont constrain random walk - way of dealing with unidentifiability
+      prior='pc.prec',
+      param = c(0.1/(52*100), 0.05)) + #over 100 years the change in weekly maximum temperature will exceed 10%, 5% of the time. 
+    f(weekIid, model='iid', #every week has an independent effect - short term variation - extreme temps some weeks
+      prior='pc.prec', # probability of std (σ) between weeks being greater than 1.5 is .5.
+      param = c(1.5, 0.5)) + 
+    f(yearFac, model='iid', prior='pc.prec', #some summers are warmers than others due to other climate things, so we put year in as a random effect
+      param = c(.75, 0.5)), # probability of std (σ) between years being greater than .75 is .5.  . We use these different priors since variation in average summer temperatures between years is less than deviation of temperatures between weeks
+  family='T', #fit a t-distribution
+  control.family = list(
+    hyper = list(
+      prec = list(prior='pc.prec', param=c(1, 0.5)), #precision is about 1, no link function - the standard deviation of an individual daily obersevation is 1 up or down - 50% of the time the standard deviation of average temperature between days is greater than 1. - scaled t distribution 
+      dof = list(prior='pc.dof', param=c(10, 0.5)))), #10 degree of freedom, heavier than starding values 
+  control.mode = list(theta = c(-1,2,20,0,1), #leave control.mode in don't worry about it
+                      x = startingValues, restart=TRUE),
+  control.compute=list(config = TRUE),
+   control.inla = list(strategy='gaussian', int.strategy='eb'),
+  data = xSub, verbose=TRUE)
+```
+
+
+Now we sample our posteriors to determine the temperature change from historical levels to today and to future projections. 
+
+```{r, include=FALSE, cache=TRUE}
+
+mySample = inla.posterior.sample(n = 1000, result = sableRes, #1000 samples from the trend
+                                 num.threads = 8, selection = list(week = seq(1,
+                                                                              nrow(sableRes$summary.random$week))))
+length(mySample)
+names(mySample[[1]])
+weekSample = do.call(cbind, lapply(mySample, function(xx) xx$latent))
+dim(weekSample)
+head(weekSample)
+
+
+#we need the weeks to sample - what we do is we count how may weeks days are left between 1800's to 1900's, then divide by 7 to get the number of weeks
+#we then get the range from the start of 1900 to 1960 by adding on the correct number of weeks
+#weeks 6904-8100 are the prediction interval 
+
+new_weekSample <- as.data.frame(weekSample)
+
+#1900-1960 data
+historical_data <- new_weekSample[135:3255,]
+
+#mean for each line 
+avg_temp_historical <- as.data.frame(colMeans(historical_data))
+
+#get today's temperature data
+
+today_temp <- new_weekSample[6772,]
+
+future_temp <- new_weekSample[8100,]
+
+#take transpose
+today_temp_transpose <- t(today_temp)
+
+future_temp_transpose <- t(future_temp)
+
+#combine into one 
+
+Combined_df <- cbind(avg_temp_historical,today_temp_transpose,future_temp_transpose)
+
+#create two new columns that are the difference between today and historical and future and historical 
+
+Combined_df$change_from_today <- Combined_df$`week:6772` - Combined_df$`colMeans(historical_data)`
+
+Combined_df$change_from_future<- Combined_df$`week:8100` - Combined_df$`colMeans(historical_data)`
+
+
+futureTemp <- (quantile(Combined_df$change_from_future, probs=c(0.025, .5, .975)))
+presentTemp <-(quantile(Combined_df$change_from_today, probs=c(0.025,.5, .975)))
+```
+
+```{r ,fig.cap= "The figures above show the distribution of the change in temperature from historical levels to present and future levels from samples of the posterior.", fig.align='center',fig.pos='H', echo=FALSE}
+
+present_plot <- ggplot(data=Combined_df, aes(change_from_today))+ geom_histogram(binwidth = .25, colour="black", fill="white")+ggtitle("Temp Change - Historical To 2019 Dist.")+xlab("Change in Temp") + theme(plot.title = element_text(size=10))
+#histogram past to future
+
+future_plot <- ggplot(data=Combined_df, aes(change_from_future))+ geom_histogram(binwidth = .5, colour="black", fill="white")+ggtitle("Temp Change - Historical To 2050 Dist.")+xlab("Change in Temp")+ theme(plot.title = element_text(size=10))
+
+gridExtra::grid.arrange(present_plot, future_plot, ncol=2)
+
+```
+
+As seen below, the increase in temperature from historical levels to today is expected to be `r round(presentTemp[[2]],2)`$^\circ C$, although the 95% CI shows that the change in temperature has been anywhere from `r round(presentTemp[[1]],2)`$^\circ C$ to  `r round(presentTemp[[3]],2)`$^\circ C$.
+
+The increase in temperatures by 2052 is expected to be `r round(futureTemp[[2]],2)`$^\circ C$, although the 95% CI shows that the change in temperature has been anywhere from `r round(futureTemp[[1]],2)`$^\circ C$ to  `r round(futureTemp[[3]],2)`$^\circ C$. Please note, the wide range in credible interval is due to the uncertainty of projection far into the future. 
+
+
+```{r, include=FALSE}
+presentTemp_table <- matrix(c(round(presentTemp[[1]],2),round(presentTemp[[2]],2),round(presentTemp[[3]],2)),ncol=3,byrow=TRUE)
+colnames(presentTemp_table) <- c("2.5%","50%","97.5% ")
+rownames(presentTemp_table) <- c("Temp. Change")
+presentTemp_table <- as.table(presentTemp_table)
+
+futureTemp_table <- matrix(c(round(futureTemp[[1]],2),round(futureTemp[[2]],2),round(futureTemp[[3]],2)),ncol=3,byrow=TRUE)
+colnames(futureTemp_table) <- c("2.5%","50%","97.5% ")
+rownames(futureTemp_table) <- c("Temp. Change")
+futureTemp_table <- as.table(futureTemp_table)
+
+```
+
+
+```{r, results='asis', echo=FALSE}
+knitr::kable(presentTemp_table, digits=3, caption = "The table provides the estimate for the change in temperature from historical levels to present temperatures. The table shows the 95% CI.")
+
+```
+
+
+
+```{r, results='asis',  echo=FALSE}
+knitr::kable(futureTemp_table, digits=3,caption = "The table provides the estimate for the change in temperature from histroical levels to the predicted 2052 temperatures. The table shows the 95% CI.")
+```
+
+To aid in visualization, the figure below shows the samples of the posterior distribution used above to determine the change in temperature from historical levels to the present and future projections. We also see the time trend and the confidence interval of the time trend on the right. 
+
+```{r ,fig.cap= "The figure on the left shows the 1000 samples of the posterior distribution of the time trend. These are the samples used to find the CI for temperature change. The figure on the right is the confidence interval of the time trend.", fig.align='center',fig.pos='H', echo=FALSE}
+par(mfrow=c(1,2))
+
+forXaxis2 = ISOdate(seq(1880, 2060, by = 20), 1, 1,
+                    tz = "UTC")
+myCol = mapmisc::colourScale(NA, breaks = 1:8, style = "unique",
+                             col = "Set2", opacity = 0.3)$col
+matplot(weekValues[-1], weekSample, type = "l", lty = 1,
+        col = myCol, xlab = "time", ylab = "degrees C",
+        xaxt = "n", xaxs = "i", main= "1000 Sample - Posterior Dist. of Time Trend", cex.main=.85)
+axis(1, forXaxis2, format(forXaxis2, "%Y"))
+
+
+matplot(weekValues[-1], sableRes$summary.random$week[,
+                                                     paste0(c(0.5, 0.025, 0.975), "quant")], type = "l",
+        lty = c(1, 2, 2), xlab = "time", ylab = "degrees C",
+        xaxt = "n", col = "black", xaxs = "i", main ="CI of Time Trend", cex.main=.85)
+forXaxis2 = ISOdate(seq(1880, 2060, by = 20), 1, 1,
+                    tz = "UTC")
+axis(1, forXaxis2, format(forXaxis2, "%Y"))
+abline(v = ISOdate(2019, 10, 30, tz = "UTC"), col = "blue") #today's date
+abline(v = ISOdate(2030, 05, 1, tz = "UTC"), col = "red") #prediction
+abline(v = ISOdate(2051, 05, 1, tz = "UTC"), col = "red") #prediction
+```
+
+
+
+##Discussion
+
+Our analysis shows that the projected temperature change from historical levels to present is expected to be greater than what the IP projects, although the credible intervals do overlap. Our data does not support Burningier's claim that there are no changes in temperature from historical levels to present. As we are projecting 32 years into the future, the CI interval contains a decrease in temperature for 2052, however, the majority of the interval lays well into a positive increase in temperature. Our best estimate is that temperatures have increased by `r round(presentTemp[[2]],2)`$^\circ C$ and temperature will increase to `r round(futureTemp[[2]],2)`$^\circ C$ by 2052. 
